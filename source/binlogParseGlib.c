@@ -1,12 +1,16 @@
 
-
-
+#include <sys/types.h>
+#include <libgen.h>
+#include <sys/stat.h>
+#include <errno.h>
 #include <endian.h>
 #include <glib.h>
 #include <unistd.h>
 #include <inttypes.h>
 #include <dirent.h>
 #include <regex.h>
+#include <binary_log_types.h>
+#include "mysqlHelper/dumpFromRemote.h"
 
 
 #define MAX_HEADER_LENGTH 200
@@ -14,6 +18,8 @@
 #define CHECKSUM_LENGTH 4
 
 #define G_LOG_DOMAIN    ((gchar*) 0)
+#define MAX_ALLOWE_PACKET ((~(guint32 ) 0)/4)
+
 //static FormatDescriptionEvent* formatDescriptionEventForGlobalUse=NULL;
 
 
@@ -22,7 +28,7 @@ static gchar MAGIC_HEADER_CONTENT[4]={'\xfe','b','i','n'};
 
 static gchar* optDatabaseNames=NULL;
 static gchar* optTableNames=NULL;
-static gsize optStartPos=0;
+static gsize optStartPos=4;
 static gsize optStopPos=0;
 static gchar* optStartDatetimeStr=NULL;
 static gchar* optStopDatetimeStr=NULL;
@@ -33,260 +39,19 @@ static gchar* optOutBinlogFileNameBase=NULL;
 static gchar* optLogLevel=NULL;
 static gchar* optIncludeGtids=NULL;
 static gchar* optExcludeGtids=NULL;
+static gchar* optHost=NULL;
+static gchar* optUser=NULL;
+static gchar* optPassword=NULL;
+static guint16 optPort=0;
+
 
 
 static time_t globalStartTimestamp=0;
 static time_t globalStopTimestamp=0;
 static GArray* globalIncludeGtidsArray=NULL;
 static GArray* globalExcludeGtidsArray=NULL;
-
-
-
-
-
-enum Status_Stop_Discard
-{
-  GOON=0,
-  STOP=1,
-  DISCARD=2
-};
-
-
-enum Binlog_event_type
-{
-  UNKNOWN_EVENT= 0,
-  START_EVENT_V3= 1,
-  QUERY_EVENT= 2,
-  STOP_EVENT= 3,
-  ROTATE_EVENT= 4,
-  INTVAR_EVENT= 5,
-  LOAD_EVENT= 6,
-  SLAVE_EVENT= 7,
-  CREATE_FILE_EVENT= 8,
-  APPEND_BLOCK_EVENT= 9,
-  EXEC_LOAD_EVENT= 10,
-  DELETE_FILE_EVENT= 11,
-  NEW_LOAD_EVENT= 12,
-  RAND_EVENT= 13,
-  USER_VAR_EVENT= 14,
-  FORMAT_DESCRIPTION_EVENT= 15,
-  XID_EVENT= 16,
-  BEGIN_LOAD_QUERY_EVENT= 17,
-  EXECUTE_LOAD_QUERY_EVENT= 18,
-
-  TABLE_MAP_EVENT = 19,
-  PRE_GA_WRITE_ROWS_EVENT = 20,
-  PRE_GA_UPDATE_ROWS_EVENT = 21,
-  PRE_GA_DELETE_ROWS_EVENT = 22,
-
-  WRITE_ROWS_EVENT_V1 = 23,
-  UPDATE_ROWS_EVENT_V1 = 24,
-  DELETE_ROWS_EVENT_V1 = 25,
-
-  INCIDENT_EVENT= 26,
-
-  HEARTBEAT_LOG_EVENT= 27,
-
-  IGNORABLE_LOG_EVENT= 28,
-  ROWS_QUERY_LOG_EVENT= 29,
-
-  WRITE_ROWS_EVENT = 30,
-  UPDATE_ROWS_EVENT = 31,
-  DELETE_ROWS_EVENT = 32,
-
-  GTID_LOG_EVENT= 33,
-  ANONYMOUS_GTID_LOG_EVENT= 34,
-
-  PREVIOUS_GTIDS_LOG_EVENT= 35,
-  TRANSACTION_CONTEXT_EVENT= 36,
-
-  VIEW_CHANGE_EVENT= 37,
-
-  XA_PREPARE_LOG_EVENT= 38,
-  ENUM_END_EVENT
-};
-
-static gchar Binlog_event_type_name[][30]={
-  "UNKNOWN_EVENT",
-  "START_EVENT_V3",
-  "QUERY_EVENT",
-  "STOP_EVENT",
-  "ROTATE_EVENT",
-  "INTVAR_EVENT",
-  "LOAD_EVENT",
-  "SLAVE_EVENT",
-  "CREATE_FILE_EVENT",
-  "APPEND_BLOCK_EVENT",
-  "EXEC_LOAD_EVENT",
-  "DELETE_FILE_EVENT",
-  "NEW_LOAD_EVENT",
-  "RAND_EVENT",
-  "USER_VAR_EVENT",
-  "FORMAT_DESCRIPTION_EVENT",
-  "XID_EVENT",
-  "BEGIN_LOAD_QUERY_EVENT",
-  "EXECUTE_LOAD_QUERY_EVENT",
-
-  "TABLE_MAP_EVENT",
-  "PRE_GA_WRITE_ROWS_EVENT",
-  "PRE_GA_UPDATE_ROWS_EVENT",
-  "PRE_GA_DELETE_ROWS_EVENT",
-
-  "WRITE_ROWS_EVENT_V1",
-  "UPDATE_ROWS_EVENT_V1",
-  "DELETE_ROWS_EVENT_V1",
-
-  "INCIDENT_EVENT",
-
-  "HEARTBEAT_LOG_EVENT",
-
-  "IGNORABLE_LOG_EVENT",
-  "ROWS_QUERY_LOG_EVENT",
-
-  "WRITE_ROWS_EVENT",
-  "UPDATE_ROWS_EVENT",
-  "DELETE_ROWS_EVENT",
-  "GTID_LOG_EVENT",
-  "ANONYMOUS_GTID_LOG_EVENT",
-
-  "PREVIOUS_GTIDS_LOG_EVENT",
-  "TRANSACTION_CONTEXT_EVENT",
-
-  "VIEW_CHANGE_EVENT",
-
-  "XA_PREPARE_LOG_EVENT",
-  "ENUM_END_EVENT"
-
-};
-
-typedef enum enum_dml_types {
-  INSERT =0,
-  UPDATE =1,
-  DELETE =2,
-  UNKNOWN_TYPE
-} enum_dml_types;
-
-typedef enum enum_field_types {
-  MYSQL_TYPE_DECIMAL, MYSQL_TYPE_TINY,
-  MYSQL_TYPE_SHORT, MYSQL_TYPE_LONG,
-  MYSQL_TYPE_FLOAT, MYSQL_TYPE_DOUBLE,
-  MYSQL_TYPE_NULL, MYSQL_TYPE_TIMESTAMP,
-  MYSQL_TYPE_LONGLONG,MYSQL_TYPE_INT24,
-  MYSQL_TYPE_DATE, MYSQL_TYPE_TIME,
-  MYSQL_TYPE_DATETIME, MYSQL_TYPE_YEAR,
-  MYSQL_TYPE_NEWDATE, MYSQL_TYPE_VARCHAR,
-  MYSQL_TYPE_BIT,
-  MYSQL_TYPE_TIMESTAMP2,
-  MYSQL_TYPE_DATETIME2,
-  MYSQL_TYPE_TIME2,
-  MYSQL_TYPE_JSON=245,
-  MYSQL_TYPE_NEWDECIMAL=246,
-  MYSQL_TYPE_ENUM=247,
-  MYSQL_TYPE_SET=248,
-  MYSQL_TYPE_TINY_BLOB=249,
-  MYSQL_TYPE_MEDIUM_BLOB=250,
-  MYSQL_TYPE_LONG_BLOB=251,
-  MYSQL_TYPE_BLOB=252,
-  MYSQL_TYPE_VAR_STRING=253,
-  MYSQL_TYPE_STRING=254,
-  MYSQL_TYPE_GEOMETRY=255
-} enum_field_types;
-
-
-typedef enum enum_flag
-  {
-  /* Last event of a statement */
-  STMT_END_F = (1U << 0),
-
-  /* Value of the OPTION_NO_FOREIGN_KEY_CHECKS flag in thd->options */
-  NO_FOREIGN_KEY_CHECKS_F = (1U << 1),
-
-  /* Value of the OPTION_RELAXED_UNIQUE_CHECKS flag in thd->options */
-  RELAXED_UNIQUE_CHECKS_F = (1U << 2),
-
-  /**
-  Indicates that rows in this event are complete, that is contain
-  values for all columns of the table.
-  */
-  COMPLETE_ROWS_F = (1U << 3)
-  } enum_flag;
-
-typedef struct _GtidSetInfo{
-  gchar* uuid;
-  guint64 startSeqNo;
-  guint64 stopSeqNo;
-} GtidSetInfo;
-
-typedef struct _EventHeader{
-	guint32 binlogTimestamp;
-	guint8  eventType;
-	guint32 serverId;
-	guint32 eventLength;
-	guint32 nextEventPos;
-	guint16  flag;
-	gchar *rawEventHeader;
-} EventHeader;
-
-typedef struct _FormatDescriptionEvent{
-	EventHeader *eventHeader;
-	gchar *rawFormatDescriptionEventDataDetail;
-} FormatDescriptionEvent;
-
-typedef struct _TableMapEvent{
-	EventHeader           *eventHeader;
-	gchar                 *rawTableMapEventDataDetail;
-  gsize databaseNameLength;
-  gchar* databaseName;
-  gsize tableNameLength;
-	gchar* tableName;
-	guint64 tableId;
-	gsize columnNumber;
-	GByteArray            *columnTypeArray;
-  guint16               *columnMetadataArray;
-  gsize                  metadataBlockSize;
-} TableMapEvent;
-
-typedef struct _RowEvent{
-	EventHeader           *eventHeader;
-	gchar                 *rawRowEventDataDetail;
-} RowEvent;
-
-typedef struct _QueryEvent{
-  EventHeader           *eventHeader;
-  gchar                 *rawQueryEventDataDetail;
-  gsize                 databaseNameLength;
-  gchar                 *databaseName;
-  gchar                 sqlTextLength;
-  gchar                 *sqlText;
-} QueryEvent;
-
-
-typedef struct _GtidEvent{
-  EventHeader           *eventHeader;
-  gchar                 *rawGtidEventDataDetail;
-  gchar                 *uuid;
-  guint64               seqNo;
-} GtidEvent;
-
-
-
-typedef struct _XidEvent{
-  EventHeader           *eventHeader;
-  gchar                 *rawXidEventDataDetail;
-  guint64               xid;
-} XidEvent;
-
-typedef struct _EventWrapper{
-  guint8    eventType;
-  gpointer  eventPointer;
-} EventWrapper;
-
-
-typedef struct _LeastExecutionUnitEvents{
-	TableMapEvent *tableMapEvent;
-  GList         *rowEventList;
-  guint8        originalRowEventType;
-} LeastExecutionUnitEvents;
+static gchar** globalBinlogFileNameArray=NULL;
+static gsize globalBinlogFileNameArraySize=0;
 
 static FormatDescriptionEvent* formatDescriptionEventForGlobalUse=NULL;
 
@@ -296,100 +61,6 @@ typedef struct _Transaction{
 } Transaction;
 
 */
-
-
-gboolean isConsideredEventType(guint8 eventType){
-  gboolean isConsidered=FALSE;
-  switch(eventType){
-    case FORMAT_DESCRIPTION_EVENT:{
-      isConsidered=TRUE;
-      break;
-    }
-    case TABLE_MAP_EVENT:{
-      isConsidered=TRUE;
-      break;
-    }
-    case WRITE_ROWS_EVENT:
-    case UPDATE_ROWS_EVENT:
-    case DELETE_ROWS_EVENT:{
-      isConsidered=TRUE;
-      break;
-    }
-    case QUERY_EVENT:{
-      isConsidered=TRUE;
-      break;
-    }
-    case XID_EVENT:{
-      isConsidered=TRUE;
-      break;
-    }
-    case GTID_LOG_EVENT:{
-      isConsidered=TRUE;
-      break;
-    }
-  }
-
-  return isConsidered;
-}
-
-gboolean checkPotentialConflictOutputFile(gchar* baseName){
-    int reti;
-    regex_t regex;
-    reti = regcomp(&regex, baseName, 0);
-    if(reti){
-      g_error("failed to compile regex %s", baseName);
-    }
-    DIR           *d;
-    struct dirent *dir;
-    d = opendir(".");
-    if (d)
-    {
-      while ((dir = readdir(d)) != NULL)
-      {
-        if (!regexec(&regex, dir->d_name, 0, NULL, 0)){
-          g_error("the output %s.* may overwrite the existing file %s, please choose a newFileName specified by --outBinlogFileNameBase or remove the existing file",baseName,dir->d_name);
-          return FALSE;
-        }
-      }
-
-      closedir(d);
-    }
-
-    return TRUE;
-}
-
-gchar* constructFileNameWithPostfixIndex(gchar* baseName, gsize postfixIndex){
-  gchar* completeFileName;
-  //completeFileName=g_new0(gchar,strlen(baseName)+postfixDisplayLength+1+1);
-  if(0 == postfixIndex){
-    completeFileName=g_strdup_printf("%s",baseName);
-  }
-  else{
-    completeFileName=g_strdup_printf("%s.%06lu",baseName,postfixIndex);
-  }
-  return completeFileName;
-}
-
-gboolean rotateFile(gchar* baseName, gsize postfixIndex){
-    gchar* completeFileName=constructFileNameWithPostfixIndex(baseName,postfixIndex);
-    if( -1 == access( completeFileName, F_OK )  ) {
-      return FALSE;
-    }
-    rotateFile(baseName,postfixIndex+1);
-    gchar* newFileName=constructFileNameWithPostfixIndex(baseName,postfixIndex+1);
-    gchar* oldFileName=constructFileNameWithPostfixIndex(baseName,postfixIndex);
-    if(0 != rename(oldFileName,newFileName) ){
-      g_error("unable to rename %s to %s",oldFileName, newFileName);
-    }
-    return TRUE;
-}
-
-gboolean rotateOutputBinlogFileNames(gchar* baseName, gsize postfixIndex){
-    gchar* flashbackBaseName;
-    flashbackBaseName=g_strdup_printf("%s.%s",baseName,"flashback");
-    rotateFile(flashbackBaseName,postfixIndex);
-    return TRUE;
-}
 
 gboolean isGtidEventInGtidSet(GtidEvent* gtidEvent, GtidSetInfo* gtidSetInfo){
   if((0==memcmp(gtidEvent->uuid,gtidSetInfo->uuid,16)) ){
@@ -729,7 +400,7 @@ int printHex(gchar* dataBuffer, gsize dataBufferLength){
 
 int printEventInHex(guint8 eventType, gchar* rawEventHeader, gchar* eventDataDetail, gsize eventDataDetailLength){
 
-  g_warning("%s header:",Binlog_event_type_name[eventType]);
+  g_debug("%s header:",Binlog_event_type_name[eventType]);
   printHex(rawEventHeader,EVENT_HEADER_LENGTH);
   g_debug("data:");
   printHex(eventDataDetail,eventDataDetailLength);
@@ -777,7 +448,7 @@ int printEventWrapperInHex(EventWrapper *eventWrapper){
       eventDataDetailLength=getRawEventDataLengthWithChecksum(((RowEvent*)(eventWrapper->eventPointer))->eventHeader);
     }
     default :{
-      g_warning("skip to print the event %s",Binlog_event_type_name[eventType] );
+      g_debug("skip to print the event %s",Binlog_event_type_name[eventType] );
       return 0;
     }
   }
@@ -937,9 +608,19 @@ int parseHeader(gchar *buffer, EventHeader* eventHeader){
 	buffer=getGuint32AndAdvance(buffer,&eventLength);
 	eventHeader->eventLength=eventLength;
 
+  if( eventLength > MAX_ALLOWE_PACKET ){
+    printf("The eventLength %llu is too long, Maybe the --start-position = %d is wrong, please check \n", eventLength, optStartPos);
+    exit(1);
+  }
+
 	guint32 nextEventPos;
 	buffer=getGuint32AndAdvance(buffer,&nextEventPos);
 	eventHeader->nextEventPos=nextEventPos;
+
+  if( nextEventPos > MAX_ALLOWE_PACKET ){
+    printf("The nextEventPos %llu is too long, Maybe the --start-position =%d is wrong, please check \n", nextEventPos, optStartPos);
+    exit(1);
+  }
 
 	guint16 flag;
 	buffer=getGuint16AndAdvance(buffer,&flag);
@@ -1515,6 +1196,12 @@ int initGtidEvent(GtidEvent* gtidEvent, EventHeader *eventHeader, gchar *rawGtid
   return 0;
 }
 
+gchar* initRotateEvent(RotateEvent* rotateEvent, EventHeader *eventHeader, gchar* rawRotateEventDataDetail){
+  rotateEvent->rawRotateEventDataDetail=rawRotateEventDataDetail;
+  rotateEvent->eventHeader=eventHeader;
+  return 0;
+}
+
 int parseQueryLogEvent(gchar* dataBuffer, QueryEvent* queryEvent){
   gchar* dataBufferStart;
   dataBufferStart=dataBuffer;
@@ -1575,6 +1262,18 @@ int parseGtidEvent(gchar* dataBuffer, GtidEvent* gtidEvent){
   guint64 seqNo;
   dataBuffer=getGuint64AndAdvance(dataBuffer,&seqNo);
   gtidEvent->seqNo=seqNo;
+
+  return 0;
+
+}
+
+int parseRotateEvent(gchar* dataBuffer, RotateEvent* rotateEvent){
+  guint64 startPosition;
+  dataBuffer=getGuint64AndAdvance(dataBuffer,&startPosition);
+  gsize binlogFileNameLength=rotateEvent->eventHeader->eventLength-EVENT_HEADER_LENGTH-8;
+  gchar* binlogFileName = g_new0(gchar,binlogFileNameLength);
+  dataBuffer=getStringAndAdvance(dataBuffer,binlogFileNameLength,binlogFileName);
+  rotateEvent->binlogFileName=binlogFileName;
 
   return 0;
 
@@ -2004,7 +1703,7 @@ int reverseLeastExecutionUnitEventsForUpdateRowEvent(LeastExecutionUnitEvents *l
           continue;
         }
         fieldSizePlusLengthBytes=calcFieldSize(columnTypeArray->data[fieldIndex],rawRowEventDataDetail,leastExecutionUnitEventsForUpdateRowEvent->tableMapEvent->columnMetadataArray[fieldIndex]);
-	g_warning("BI fieldIndex=%d,fieldSizePlusLengthBytes=%d",fieldIndex,fieldSizePlusLengthBytes);
+	      g_debug("BI fieldIndex=%d,fieldSizePlusLengthBytes=%d",fieldIndex,fieldSizePlusLengthBytes);
         singleRowLevelBeforeImageEnd+=fieldSizePlusLengthBytes;
         rawRowEventDataDetail+=fieldSizePlusLengthBytes;
       }
@@ -2020,7 +1719,7 @@ int reverseLeastExecutionUnitEventsForUpdateRowEvent(LeastExecutionUnitEvents *l
           continue;
         }
         fieldSizePlusLengthBytes=calcFieldSize(columnTypeArray->data[fieldIndex],rawRowEventDataDetail,leastExecutionUnitEventsForUpdateRowEvent->tableMapEvent->columnMetadataArray[fieldIndex]);
-	g_warning("AI fieldIndex=%d,fieldSizePlusLengthBytes=%d",fieldIndex,fieldSizePlusLengthBytes);
+	      g_debug("AI fieldIndex=%d,fieldSizePlusLengthBytes=%d",fieldIndex,fieldSizePlusLengthBytes);
         singleRowLevelAfterImageEnd+=fieldSizePlusLengthBytes;
         rawRowEventDataDetail+=fieldSizePlusLengthBytes;
       }
@@ -2038,7 +1737,7 @@ int reverseLeastExecutionUnitEventsForUpdateRowEvent(LeastExecutionUnitEvents *l
 int reverseLeastExecutionUnitEventsForWriteOrDeleteRowEvent(LeastExecutionUnitEvents *leastExecutionUnitEventsForWriteOrDeleteRowEvent,guint8 targetEventType){
 
   if( (WRITE_ROWS_EVENT != targetEventType) && ( DELETE_ROWS_EVENT != targetEventType ) ){
-    g_warning("Only for delete and write event, but this event type is  %s\n", Binlog_event_type_name[targetEventType]);
+    g_debug("Only for delete and write event, but this event type is  %s\n", Binlog_event_type_name[targetEventType]);
     return 0;
   }
 
@@ -2126,12 +1825,12 @@ GList* constructBinlogFromEventListWithSizeLimit(GList* allEventsList, gchar* bi
     currentPos=modifyAndReturnNextEventPos(eventHeader,currentPos);
     ioStatus = g_io_channel_write_chars(binlogOutChannel,eventHeader->rawEventHeader,EVENT_HEADER_LENGTH,&bytes_written,NULL);
     if  ( G_IO_STATUS_NORMAL != ioStatus){
-      g_warning("Failed to write the header");
+      g_debug("Failed to write the header");
       return NULL;
     }
     ioStatus=g_io_channel_write_chars(binlogOutChannel,getRawEventDataFromWrapper(eventWrapper),getRawEventDataLengthWithChecksum(eventHeader),&bytes_written,NULL);
     if  ( G_IO_STATUS_NORMAL != ioStatus){
-      g_warning("Failed to write the  data");
+      g_debug("Failed to write the  data");
       return NULL;
     }
     if((maxSplitSize>0)&&(currentPos >=maxSplitSize)){
@@ -2145,7 +1844,7 @@ GList* constructBinlogFromEventListWithSizeLimit(GList* allEventsList, gchar* bi
   }
   ioStatus = g_io_channel_flush(binlogOutChannel,NULL);
   if  ( G_IO_STATUS_NORMAL != ioStatus){
-    g_warning("Failed to flush, still some events in memory");
+    g_debug("Failed to flush, still some events in memory");
     return NULL;
   }
   return allEventsList;
@@ -2158,7 +1857,7 @@ GList* splitBigRowEventsToTableMapWithRowEventForEventList(GList* allEventsList)
   EventWrapper* prevTableMapEventWrapper=NULL;
   guint8 prevEventType=0;
    while(NULL != allEventsList){
-     g_warning("in splitBigRowEventsToTableMapWithRowEventForEventList: %s",Binlog_event_type_name[((EventWrapper*)(allEventsList->data))->eventType]);
+     g_debug("in splitBigRowEventsToTableMapWithRowEventForEventList: %s",Binlog_event_type_name[((EventWrapper*)(allEventsList->data))->eventType]);
      if( NULL != allEventsList->prev ){
        prevEventType=((EventWrapper*)(allEventsList->prev->data))->eventType;
      }
@@ -2169,7 +1868,7 @@ GList* splitBigRowEventsToTableMapWithRowEventForEventList(GList* allEventsList)
 
      if( (isRowEvent(prevEventType))&& ( isRowEvent(((EventWrapper*)(allEventsList->data))->eventType)) &&(NULL != prevTableMapEventWrapper)){
        splitedEventList=g_list_prepend(splitedEventList,prevTableMapEventWrapper);
-       g_warning("TABLE_MAP_EVENT added");
+       g_debug("TABLE_MAP_EVENT added");
      }
      splitedEventList=g_list_prepend(splitedEventList,(EventWrapper*)(allEventsList->data));
 
@@ -2229,12 +1928,12 @@ int constructBinlogFromLeastExecutionUintList( GList* allLeastExecutionUnitList 
     currentPos=modifyAndReturnNextEventPos(tableMapEvent->eventHeader,currentPos);
     ioStatus = g_io_channel_write_chars(binlogFlashbackOutChannel,tableMapEvent->eventHeader->rawEventHeader,EVENT_HEADER_LENGTH,&bytes_written,NULL);
     if  ( G_IO_STATUS_NORMAL != ioStatus){
-      g_warning("Failed to write the TABLE_MAP_EVENT header");
+      g_debug("Failed to write the TABLE_MAP_EVENT header");
       return 1;
     }
     ioStatus = g_io_channel_write_chars(binlogFlashbackOutChannel,tableMapEvent->rawTableMapEventDataDetail,getRawEventDataLengthWithChecksum(tableMapEvent->eventHeader),&bytes_written,NULL);
     if  ( G_IO_STATUS_NORMAL != ioStatus){
-      g_warning("Failed to write the TABLE_MAP_EVENT data");
+      g_debug("Failed to write the TABLE_MAP_EVENT data");
       return 1;
     }
 
@@ -2249,13 +1948,13 @@ int constructBinlogFromLeastExecutionUintList( GList* allLeastExecutionUnitList 
       currentPos=modifyAndReturnNextEventPos(rowEvent->eventHeader,currentPos);
       ioStatus = g_io_channel_write_chars(binlogFlashbackOutChannel,rowEvent->eventHeader->rawEventHeader,EVENT_HEADER_LENGTH, &bytes_written, NULL);
       if  ( G_IO_STATUS_NORMAL != ioStatus){
-        g_warning("Failed to write the %s data", Binlog_event_type_name[eventType]);
+        g_debug("Failed to write the %s data", Binlog_event_type_name[eventType]);
         return 1;
       }
 
       ioStatus = g_io_channel_write_chars(binlogFlashbackOutChannel,rowEvent->rawRowEventDataDetail,getRawEventDataLengthWithChecksum(rowEvent->eventHeader), &bytes_written, NULL);
       if  ( G_IO_STATUS_NORMAL != ioStatus){
-        g_warning("Failed to write the %s data", Binlog_event_type_name[eventType]);
+        g_debug("Failed to write the %s data", Binlog_event_type_name[eventType]);
         return 1;
       }
       rowEventList=rowEventList->next;
@@ -2284,7 +1983,7 @@ int flashbackAllEvents(GList* allEventsList){
   GList *allLeastExecutionUnitList;
   allLeastExecutionUnitList=NULL;
   constructLeastExecutionUnitFromAllEventsList(flashbackEventList,&allLeastExecutionUnitList);
-  g_debug("have %u events ", g_list_length(flashbackEventList));
+  g_warning("have %u events ", g_list_length(flashbackEventList));
   GList* tempAllLeastExecutionUnitList;
   tempAllLeastExecutionUnitList=allLeastExecutionUnitList;
   while( NULL != tempAllLeastExecutionUnitList ){
@@ -2303,7 +2002,102 @@ int flashbackAllEvents(GList* allEventsList){
 }
 
 
+int parseAndaddEventToAllEventList(GList **allEventsList,EventHeader *eventHeader,gchar* dataBuffer, gboolean *isShouldDiscardForGtid){
 
+  switch(eventHeader->eventType){
+    case TABLE_MAP_EVENT:{
+      TableMapEvent *tableMapEvent = g_new0(TableMapEvent,1);
+      initTableMapEvent(tableMapEvent,eventHeader,dataBuffer);
+      parseTableMapEventData(dataBuffer,tableMapEvent);
+      appendToAllEventList(allEventsList,eventHeader,(gpointer)tableMapEvent);
+      //g_debug("TABLE_MAP_EVENT found");
+
+      break;
+    }
+    case FORMAT_DESCRIPTION_EVENT:{
+      FormatDescriptionEvent * formatDescriptionEvent=g_new0(FormatDescriptionEvent,1);
+      initFormatDescriptionEvent(formatDescriptionEvent, eventHeader, dataBuffer);
+      setFormatDescriptionEventForGlobalUse(formatDescriptionEvent);
+      //g_debug("just skip the FORMAT_DESCRIPTION_EVENT \n");
+
+      break;
+    }
+    case WRITE_ROWS_EVENT:
+    case UPDATE_ROWS_EVENT:
+    case DELETE_ROWS_EVENT:{
+      RowEvent *rowEvent = g_new0(RowEvent,1);
+      initRowEvent(rowEvent,eventHeader,dataBuffer);
+      appendToAllEventList(allEventsList,eventHeader,(gpointer)rowEvent);
+      //g_debug("%s found",Binlog_event_type_name[eventHeader->eventType]);
+
+      break;
+    }
+    case QUERY_EVENT:{
+      QueryEvent *queryEvent = g_new0(QueryEvent,1);
+      initQueryEvent(queryEvent,eventHeader,dataBuffer);
+      appendToAllEventList(allEventsList,eventHeader,(gpointer)queryEvent);
+      //g_list_append(allEventsList,( gpointer )eventWrapper);
+
+      break;
+    }
+    case XID_EVENT:{
+      XidEvent *xidEvent= g_new0(XidEvent,1);
+      initXidEvent(xidEvent,eventHeader,dataBuffer);
+      appendToAllEventList(allEventsList,eventHeader,(gpointer)xidEvent);
+      break;
+    }
+    case GTID_LOG_EVENT:{
+      GtidEvent *gtidEvent= g_new0(GtidEvent,1);
+      initGtidEvent(gtidEvent,eventHeader,dataBuffer);
+      parseGtidEvent(dataBuffer,gtidEvent);
+      appendToAllEventList(allEventsList,eventHeader,(gpointer)gtidEvent);
+      *isShouldDiscardForGtid=isTransactionShouldDiscardForGtid(gtidEvent);
+      break;
+    }
+
+
+
+  }
+  g_debug("%s found",Binlog_event_type_name[eventHeader->eventType]);
+  return 0;
+
+}
+
+guint8 stopOrDiscardForPositionDatetimeGtid(gsize *currentPos, guint16 fileIndex, gboolean isLastFile, EventHeader* eventHeader, gboolean isShouldDiscardForGtid){
+
+  gboolean isShouldStop=FALSE;
+  isShouldStop=getNextPosOrStop(&currentPos,fileIndex,isLastFile);
+  if (TRUE == isShouldStop ) {
+    g_warning("we have reach the stop pos, stop parsing");
+    return OK_STOP;
+  }
+
+  guint8 statusForDatatime;
+  statusForDatatime=isShouldStopOrDiscardForDateTimeRange(eventHeader->binlogTimestamp);
+  if (STOP == statusForDatatime ) {
+    g_warning("we have reach the stop date, stop parsing");
+    return OK_STOP;
+  }else if((DISCARD == statusForDatatime) && ( FORMAT_DESCRIPTION_EVENT != eventHeader->eventType)) {
+    g_debug("we discard the event for it less than the startDatetime");
+    return OK_DISCARD;
+  }
+
+  if((TRUE == isShouldDiscardForGtid) && isConsideredEventType(eventHeader->eventType)){
+    g_debug("we discard it for gtid setting");
+    return OK_DISCARD;
+  }
+
+  return OK_CONTINUE;
+}
+
+gboolean isShouldStopForBinlogFile(gchar* binlogFileName, gchar* rotateFileName){
+  if( 0 != g_ascii_strcasecmp(binlogFileName,rotateFileName)){
+    return TRUE;
+  }
+  return FALSE;
+}
+
+//int processBinlog_temp()
 
 
 int processBinlog(GIOChannel * binlogGlibChannel,gsize fileIndex, gboolean isLastFile){
@@ -2334,7 +2128,7 @@ int processBinlog(GIOChannel * binlogGlibChannel,gsize fileIndex, gboolean isLas
 		gsize realDataLength;
 
 		if (G_IO_STATUS_NORMAL == (ioStatus = g_io_channel_read_chars(binlogGlibChannel,dataBuffer,(eventHeader->eventLength-EVENT_HEADER_LENGTH),&realDataLength,NULL)) ){
-			g_warning("event type: %s ",Binlog_event_type_name[eventHeader->eventType]);
+			g_debug("event type: %s ",Binlog_event_type_name[eventHeader->eventType]);
 			switch(eventHeader->eventType){
 				case TABLE_MAP_EVENT:{
 					TableMapEvent *tableMapEvent = g_new0(TableMapEvent,1);
@@ -2400,16 +2194,16 @@ int processBinlog(GIOChannel * binlogGlibChannel,gsize fileIndex, gboolean isLas
     guint8 statusForDatatime;
     statusForDatatime=isShouldStopOrDiscardForDateTimeRange(eventHeader->binlogTimestamp);
     if (STOP == statusForDatatime ) {
-      g_warning("we have reach the stop pos, stop parsing");
+      g_warning("we have reach the stop date, stop parsing");
       break;
     }else if((DISCARD == statusForDatatime) && ( FORMAT_DESCRIPTION_EVENT != eventHeader->eventType)) {
-      g_warning("we discard the event for it less than the startDatetime");
+      g_debug("we discard the event for it less than the startDatetime");
       GList* head = allEventsList;
       allEventsList=g_list_delete_link(allEventsList,head);
     }
 
     if((TRUE == isShouldDiscardForGtid) && isConsideredEventType(eventHeader->eventType)){
-      g_warning("we discard it for gtid setting");
+      g_debug("we discard it for gtid setting");
       GList* head = allEventsList;
       allEventsList=g_list_delete_link(allEventsList,head);
     }
@@ -2440,6 +2234,10 @@ int processBinlog(GIOChannel * binlogGlibChannel,gsize fileIndex, gboolean isLas
 
 
 }
+
+
+
+
 
 int64_t S64(const char *s) {
   int64_t i;
@@ -2511,6 +2309,10 @@ int parseOption(int argc, char **argv){
       { "logLevel", 0, 0, G_OPTION_ARG_STRING, &optLogLevel, "log level, available option is debug,warning,error", NULL },
       { "include-gtids",0,0,G_OPTION_ARG_STRING, &optIncludeGtids, "gtids to process", NULL },
       { "exclude-gtids",0,0,G_OPTION_ARG_STRING, &optExcludeGtids, "gtids to skip", NULL },
+      { "host",0,0,G_OPTION_ARG_STRING, &optHost, "remote host to connect", NULL },
+      { "user",0,0,G_OPTION_ARG_STRING, &optUser, "remote user to connect", NULL },
+      { "password",0,0,G_OPTION_ARG_STRING, &optPassword, "password to connect", NULL },
+      { "port",0,0,G_OPTION_ARG_INT, &optPort, "remote port to connect", NULL },
       { NULL }
     };
 
@@ -2526,6 +2328,9 @@ int parseOption(int argc, char **argv){
      gchar defaultBaseName[]="binlog_output_base";
      optOutBinlogFileNameBase=g_new0(gchar, strlen(defaultBaseName)+1);
      memcpy(optOutBinlogFileNameBase,defaultBaseName,strlen(defaultBaseName)+1);
+   }
+   if( ! isDirExists(optOutBinlogFileNameBase) ){
+     exit(1);
    }
    checkPotentialConflictOutputFile(optOutBinlogFileNameBase);
    //convert MB to B
@@ -2564,9 +2369,26 @@ int parseOption(int argc, char **argv){
    globalIncludeGtidsArray=parsemultipleGtidSetToGtidSetInfoArray(optIncludeGtids);
    globalExcludeGtidsArray=parsemultipleGtidSetToGtidSetInfoArray(optExcludeGtids);
 
+   if(NULL == optBinlogFiles){
+     g_warning("Please specify the binlog file in  --binlogFileNames");
+     exit(1);
+   }
+   globalBinlogFileNameArray=g_strsplit(optBinlogFiles,",",0);
+   globalBinlogFileNameArraySize=0;
+
+
+
+   while (globalBinlogFileNameArray[globalBinlogFileNameArraySize]) {
+     globalBinlogFileNameArraySize++;
+   }
+
    return 0;
 
 }
+
+
+
+
 
 static void _dummy(const gchar *log_domain,
                      GLogLevelFlags log_level,
@@ -2594,37 +2416,20 @@ int setLogHandler(){
 }
 
 
-int main(int argc, char **argv){
-
-  parseOption(argc,argv);
-  setLogHandler();
-  gchar **binlogFileNameArray;
-  if(NULL == optBinlogFiles){
-    g_warning("please specify the binlog file");
-    exit(1);
-  }
-  binlogFileNameArray=g_strsplit(optBinlogFiles,",",0);
-  gsize binlogFileNameArraySize=0;
-
-
-  while (binlogFileNameArray[binlogFileNameArraySize]) {
-    binlogFileNameArraySize++;
-  }
-
-  gsize i=0;
-
-  while( binlogFileNameArray[i] ){
-	if( access(binlogFileNameArray[i] , F_OK ) == -1 ) {
- 		g_error("binlog:%s does not exist\n",binlogFileNameArray[i]);
-		return 1;
-	}
+int flashbackLocal(){
+  gsize fileIndex=0;
+  while( globalBinlogFileNameArray[fileIndex] ){
+	   if( access(globalBinlogFileNameArray[fileIndex] , F_OK ) == -1 ) {
+ 		    g_error("binlog:%s does not exist\n",globalBinlogFileNameArray[fileIndex]);
+		    return 1;
+	   }
 
 
 
   	GIOChannel * binlogGlibChannel;
-  	binlogGlibChannel = g_io_channel_new_file(binlogFileNameArray[i],"r",NULL);
+  	binlogGlibChannel = g_io_channel_new_file(globalBinlogFileNameArray[fileIndex],"r",NULL);
   	if (NULL == binlogGlibChannel){
-  		g_warning("failed to open %s \n", binlogFileNameArray[i]);
+  		g_warning("failed to open %s \n", globalBinlogFileNameArray[fileIndex]);
   	}
   	GIOStatus encodingSetStatus;
   	encodingSetStatus = g_io_channel_set_encoding(binlogGlibChannel,NULL,NULL);
@@ -2632,9 +2437,197 @@ int main(int argc, char **argv){
   		g_warning("failed to set to binary mode \n");
   	}
     rotateOutputBinlogFileNames(optOutBinlogFileNameBase,0);
-	  processBinlog(binlogGlibChannel,i, ( i == (binlogFileNameArraySize-1) ) );
-     i++;
-   }
+
+    guint64 MagicHeaderLength=4;
+  	guint64 currentPos;
+  	currentPos=MagicHeaderLength;
+  	GIOStatus ioStatus;
+  	ioStatus=g_io_channel_seek_position(binlogGlibChannel,currentPos,G_SEEK_SET,NULL);
+  	if(G_IO_STATUS_NORMAL != ioStatus ){
+  		g_warning("failed to advance the offset: %ld ", MagicHeaderLength);
+  	}
+
+  	gchar* headerBuffer;
+  	headerBuffer=(gchar*)malloc(MAX_HEADER_LENGTH);
+  	gsize realHeaderLength;
+    GList *allEventsList = NULL;
+    gboolean isShouldDiscardForGtid=FALSE;
+    gboolean isLastFile=FALSE;
+    while( G_IO_STATUS_NORMAL == (ioStatus = g_io_channel_read_chars(binlogGlibChannel,headerBuffer,EVENT_HEADER_LENGTH,&realHeaderLength,NULL))){
+  		EventHeader *eventHeader;
+  		eventHeader=g_new0(EventHeader,1);
+  		parseHeader(headerBuffer,eventHeader);
+  		currentPos += EVENT_HEADER_LENGTH;
+  		if( G_IO_STATUS_NORMAL != (ioStatus=g_io_channel_seek_position(binlogGlibChannel,currentPos,G_SEEK_SET,NULL)) ){
+  			g_warning("failed to seek the pos %ld \n", currentPos);
+  		}
+
+  		gchar* dataBuffer = g_new0(gchar , (eventHeader->eventLength-EVENT_HEADER_LENGTH));
+  		gsize realDataLength;
+
+  		if (G_IO_STATUS_NORMAL == (ioStatus = g_io_channel_read_chars(binlogGlibChannel,dataBuffer,(eventHeader->eventLength-EVENT_HEADER_LENGTH),&realDataLength,NULL)) ){
+  			g_debug("event type: %s ",Binlog_event_type_name[eventHeader->eventType]);
+  			parseAndaddEventToAllEventList(&allEventsList,eventHeader,dataBuffer,&isShouldDiscardForGtid);
+
+
+  		}
+  		currentPos=eventHeader->nextEventPos;
+      guint8 exitStatus;
+      isLastFile=( fileIndex == (globalBinlogFileNameArraySize-1) );
+      exitStatus=stopOrDiscardForPositionDatetimeGtid(&currentPos,fileIndex,isLastFile,eventHeader,isShouldDiscardForGtid);
+      if( OK_STOP == exitStatus){
+        break;
+      }else if(OK_DISCARD == exitStatus){
+        GList* head = allEventsList;
+        allEventsList=g_list_delete_link(allEventsList,head);
+      }
+
+
+  		if( G_IO_STATUS_NORMAL != (ioStatus=g_io_channel_seek_position(binlogGlibChannel,currentPos,G_SEEK_SET,NULL)) ){
+  			g_warning("failed to seek the pos %ld ", currentPos);
+  		}
+
+  		headerBuffer=(gchar*)malloc(MAX_HEADER_LENGTH);
+
+  	}
+    g_debug("have %u events ", g_list_length(allEventsList));
+
+    allEventsList=g_list_reverse(allEventsList);
+    if(optMaxSplitSize>0){
+      constructBinlogFromEventList(allEventsList);
+      g_warning("just split the binlog ");
+      return 0;
+    }
+
+    flashbackAllEvents(allEventsList);
+
+	  //processBinlog(binlogGlibChannel,i, ( i == (globalBinlogFileNameArraySize-1) ) );
+     fileIndex++;
+  }
+}
+
+int flashbackRemote(){
+  MYSQL* mysql;
+  NET* net= NULL;
+  if( (NULL == optHost) || (NULL == optUser) || (NULL == optPassword) ){
+    g_error("Please specify the host,user,password");
+    exit(1);
+  }
+  mysql=getConnection(optHost,optPort,optUser,optPassword,NULL,NULL);
+  net=&mysql->net;
+
+  //sendBinlogDumpCommand(mysql,logName,startPosition);
+  guint32 fileIndex=0;
+  gsize startPositionForSpecificFile=4;
+  gsize stopPositionForSpecificFile=0;
+  gsize completePacketLen;
+  gboolean isLastFile=FALSE;
+  while( globalBinlogFileNameArray[fileIndex] ){
+    if (fileIndex == 0){
+      startPositionForSpecificFile=optStartPos;
+    }else{
+      startPositionForSpecificFile=4;
+    }
+    if(fileIndex == globalBinlogFileNameArraySize - 1){
+      stopPositionForSpecificFile=optStopPos;
+      isLastFile=TRUE;
+    }else{
+      stopPositionForSpecificFile=0;
+      isLastFile=FALSE;
+    }
+
+    if ( OK_CONTINUE != sendBinlogDumpCommand(mysql,globalBinlogFileNameArray[fileIndex],startPositionForSpecificFile)){
+      g_warning("failed to dump binlog");
+      exit(1);
+    }
+
+    gchar* headerBuffer;
+    gchar* dataBuffer;
+    gsize currentPos=0;
+    gboolean isShouldDiscardForGtid;
+    GList *allEventsList = NULL;
+
+    for(;;){
+
+      completePacketLen=cli_safe_read(mysql, NULL);
+      if ( completePacketLen ==packet_error ){
+        g_warning("Got error reading packet from server: %s",mysql_error(mysql));
+        return ERROR_STOP;
+      }
+
+      if(completePacketLen < 8 && net->read_pos[0] ==254 )
+        break;
+
+      EventHeader *eventHeader;
+      eventHeader=g_new0(EventHeader,1);
+      headerBuffer=getHeaderFromRawEvent(((gchar *) net->read_pos + 1), EVENT_HEADER_LENGTH );
+  		parseHeader(headerBuffer,eventHeader);
+
+      dataBuffer=getDataFromRawEvent(((gchar *) net->read_pos + 1+EVENT_HEADER_LENGTH),eventHeader->eventLength-EVENT_HEADER_LENGTH);
+
+      parseAndaddEventToAllEventList(&allEventsList,eventHeader,dataBuffer,&isShouldDiscardForGtid);
+
+      currentPos=eventHeader->nextEventPos;
+      guint8 exitStatus;
+
+      if( ROTATE_EVENT == eventHeader->eventType ){
+        RotateEvent *rotateEvent = g_new0(RotateEvent,1);
+        initRotateEvent(rotateEvent,eventHeader,dataBuffer);
+        parseRotateEvent(dataBuffer,rotateEvent);
+        if( isShouldStopForBinlogFile(globalBinlogFileNameArray[fileIndex], rotateEvent->binlogFileName ) ){
+          break;
+        }
+      }
+
+      exitStatus=stopOrDiscardForPositionDatetimeGtid(&currentPos,fileIndex,isLastFile,eventHeader,isShouldDiscardForGtid);
+      if( OK_STOP == exitStatus){
+        break;
+      }else if(OK_DISCARD == exitStatus){
+        GList* head = allEventsList;
+        allEventsList=g_list_delete_link(allEventsList,head);
+      }
+
+    }
+
+    g_warning("have %u events ", g_list_length(allEventsList));
+
+    allEventsList=g_list_reverse(allEventsList);
+    if(optMaxSplitSize>0){
+      constructBinlogFromEventList(allEventsList);
+      g_warning("just split the binlog ");
+      return 0;
+    }
+    rotateOutputBinlogFileNames(optOutBinlogFileNameBase,0);
+    flashbackAllEvents(allEventsList);
+
+    fileIndex++;
+
+  }
+
+
+}
+
+
+int main(int argc, char **argv){
+
+  parseOption(argc,argv);
+  setLogHandler();
+
+  if(NULL == optBinlogFiles){
+    g_warning("please specify the binlog file");
+    exit(1);
+  }
+
+  gboolean isFromRemote=FALSE;
+
+  isFromRemote = (optHost ==NULL)? FALSE:TRUE;
+  if( isFromRemote ){
+    flashbackRemote();
+    return 0;
+  }
+  flashbackLocal();
+
+
 
 	return 0;
 
